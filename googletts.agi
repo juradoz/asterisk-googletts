@@ -51,6 +51,9 @@ $| = 1;
 # Default language              #
 my $lang = "en";
 
+# Google API key                #
+my $api_key = "";
+
 # Output speed factor           #
 my $speed = 1;
 
@@ -82,9 +85,13 @@ my $intkey  = "";
 my $tmpdir  = "/tmp";
 my $maxlen  = 4096;
 my $timeout = 10;
-my $url     = "https://translate.google.com";
+my $url     = "https://texttospeech.googleapis.com/v1/text:synthesize";
 my $sox     = `/usr/bin/which sox`;
 my $mpg123  = `/usr/bin/which mpg123`;
+
+my $jq = `/usr/bin/which jq`;
+my $base64 = `/usr/bin/which base64`;
+my $cat = `/usr/bin/which cat`;
 
 # Store AGI input #
 ($AGI{arg_1}, $AGI{arg_2}, $AGI{arg_3}, $AGI{arg_4}) = @ARGV;
@@ -96,8 +103,13 @@ while (<STDIN>) {
 my $name = " -- $AGI{request}:";
 
 # Abort if required programs not found. #
-fatal_log("sox or mpg123 is missing. Aborting.") if (!$sox || !$mpg123);
-chomp($sox, $mpg123);
+fatal_log("sox is missing. Aborting.") if (!$sox);
+fatal_log("mpg123 is missing. Aborting.") if (!$mpg123);
+fatal_log("jq is missing. Aborting.") if (!$jq);
+fatal_log("base64 is missing. Aborting.") if (!$base64);
+fatal_log("cat is missing. Aborting.") if (!$cat);
+
+chomp($sox, $mpg123,, $jq, $base64, $cat);
 
 # Sanitising input #
 $AGI{arg_1} = decode('utf8', $AGI{arg_1});
@@ -198,24 +210,25 @@ for (my $i = 0; $i < $lines; $i++) {
 
 	($fh, $tmpname) = tempfile("ggl_XXXXXXXX", DIR => $tmpdir, UNLINK => 1);
 	my $token = make_token($line);
-	$line = uri_escape($line);
-	my $req   = "$url/translate_tts?ie=UTF-8&q=$line&tl=$lang&total=$lines&idx=$i&textlen=$len&client=tw-ob&tk=$token&prev=input";
-	console_log("URL passed: $req") if ($debug);
 
-	my $ua_request = HTTP::Request->new('GET' => $req);
+	my $req   = "$url?key=$token";
+	console_log("URL passed: $url") if ($debug);
+
+	my $json = "{'audioConfig':{'audioEncoding':'MP3','effectsProfileId':['telephony-class-application'],'pitch':0,'speakingRate':1.1},'input':{'text':'$line'},'voice':{'languageCode':'pt-BR','name':'pt-BR-Wavenet-A'}}";
+
+	my $ua_request = HTTP::Request->new('POST' => $req);
 	$ua_request->header(
-		'Accept'          => '*/*',
-		'Accept-Encoding' => 'identity;q=1, *;q=0',
-		'Accept-Language' => 'en-US,en;q=0.5',
-		'DNT'             => '1',
-		'Range'           => 'bytes=0-',
-		'Referer'         => 'https://translate.google.com/',
+		"Content-Type"          => "application/json; charset=utf-8",
 	);
+	$ua_request->content( $json );
 	my $ua_response = $ua->request($ua_request, $tmpname);
 	fatal_log("Failed to fetch file: ", $ua_response->code, $ua_response->message) unless ($ua_response->is_success);
 
+	system("$cat $tmpname | $jq -r .audioContent | $base64 --decode > $tmpname.mp3") == 0
+		or fatal_log("decode failed: $?");
+
 	# Convert mp3 file to 16bit 8Khz or 16kHz mono raw #
-	system($mpg123, "-q", "-w", "$tmpname.wav", $tmpname) == 0
+	system($mpg123, "-q", "-w", "$tmpname.wav", "$tmpname.mp3") == 0
 		or fatal_log("$mpg123 failed: $?");
 
 	# Detect sox version #
@@ -304,23 +317,8 @@ sub get_sox_args {
 	return @soxargs;
 }
 
-# Obfuscated crap straight from Google:
-# https://translate.google.com/translate/releases/twsfe_w_20151214_RC03/r/js/desktop_module_main.js
 sub make_token {
-	my $text = shift;
-	my $time = int(time() / 3600);
-	my @chars = unpack('U*', $text);
-	my $stamp = $time;
-
-	foreach (@chars) {
-		$stamp = make_rl($stamp + $_, '+-a^+6');
-	}
-	$stamp = make_rl($stamp, '+-3^+b+-f');
-	if ($stamp < 0) {
-		$stamp = ($stamp & 2147483647) + 2147483648;
-	}
-	$stamp %= 10**6;
-	return ($stamp . '.' . ($stamp ^ $time));
+	return $api_key;
 }
 
 sub make_rl {
